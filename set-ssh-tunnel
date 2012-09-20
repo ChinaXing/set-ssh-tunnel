@@ -1,0 +1,346 @@
+#!/home/admin/install/perl/bin/perl
+
+## ---------------------
+#  Function : set ssh tunnel between peconsole1.cm3 -> apphost
+#  Author   : Yunxing (yunxing.cyx@taobao.com)
+#  Date     : 2012-03-22
+#           : 2012-06-18  use socketpair to IPC and use perlFork instead of perlThreads
+## ---------------------
+
+use Term::ReadKey;
+use Term::ReadLine;
+use Net::OpenSSH;
+use IO::Select;
+use IO::Socket;
+use Getopt::Long;
+use POSIX ":sys_wait_h";
+use Pod::Usage;
+
+$|=1;
+
+my ($user,$password,
+    @hosts,$keyfile,
+    @hostsfiles,
+    $single,
+    $ngethost,
+    @nodegroups,
+    @cmd,$key_content
+);
+my %ssh_options=(
+        tty             => 1,
+        timeout         => 2,
+        async           => 0,
+        stdin_discard   => 1,
+        stdout_discard  => 1,
+        stderr_discard  => 1,
+      );
+my %master_options=(
+       timeout                  => 2,
+       kill_ssh_on_timeout      => 3,
+       master_stderr_discard    => 1,
+       master_stdout_discard    => 1,
+       default_encoding         => 'C',
+       master_opts => [ -o => "PreferredAuthentications=password" , 
+                        -o => "NumberOfPasswordPrompts=1",
+                        -o => "StrictHostkeyChecking=no",
+                      ],
+);
+
+
+
+# ------------------------------------------------------------------------
+# Begin 
+# ------------------------------------------------------------------------
+
+GetOptions(
+            "u|user=s" => \$user,
+            "h|hosts=s{,}" => \@hosts,
+            "g|nodegroups=s{,}" => \@nodegroups,
+            "k|keyfile=s" => \$keyfile,
+            "f|hostsfile=s{,}" => \@hostsfiles,
+            "n:s" => \$ngethost,
+            "s:s" => \$single,
+            "p|password=s" => \$password,
+          ) or &Usage();
+
+
+
+&Usage  if (@ARGV > 0);
+
+&Usage() if(@hosts == 0 && @nodegroups == 0 && @hostsfiles == 0);
+
+# ------------------------------------------------------------------------
+# Parse arguments  , gather 'hosts,user,password,keyfile'
+# ------------------------------------------------------------------------
+
+# -----------------------------------------
+# process nodegroups : -g 
+# -----------------------------------------
+
+foreach my $nodegroup (@nodegroups){
+        my $hsts;
+        
+        if(defined($ngethost)){ #  -n 
+           $hsts=`ngethost $nodegroup`; 
+        }else{
+           if(defined($single)){ # -s
+              $hsts=`opsfree -eg $nodegroup -s $single --split ' '`; 
+           }else{
+              $hsts=`opsfree -eg $nodegroup --split ' '`; 
+           }
+       }
+
+       chomp($hsts);
+       @_=split / /,$hsts;
+       push @hosts,@_;
+}
+
+# -----------------------------------------
+# process hostsfile : -f
+# -----------------------------------------
+
+foreach my $hf (@hostsfiles){
+           if(!open(HF,"<",$hf)){ 
+              print STDERR "open $hf failed,ignore";
+              next;
+           } 
+           while(<HF>){
+                chomp;
+                s/ +/,/g;
+                @_=split /,/,$_;
+                push @hosts,@_;
+           }
+           close(HF);
+}
+
+# -----------------------------------------
+# check hosts we collected 
+# -----------------------------------------
+
+if(@hosts == 0 ){
+       print STDERR "no hosts specify";
+       exit 1;
+}
+
+
+# -----------------------------------------
+# keyfile
+# -----------------------------------------
+
+if(!defined($keyfile)){
+       $keyfile='/home/admin/.ssh/id_rsa.pub';
+}
+
+# -----------------------------------------
+# get user
+# -----------------------------------------
+
+$user=$ENV{'USER'} unless $user;
+
+# -----------------------------------------
+## get password from tty
+# -----------------------------------------
+
+if(!$password){
+
+    my $term=Term::ReadLine->new('password');
+    my $prompt="enter <$user>'s password:";
+
+    ReadMode noecho;
+    #  try there times
+    for(my $i=0;$i<3;$i++)
+    {
+      if(defined($password=$term->readline($prompt))){ 
+          if($@){
+                 warn $@;
+           }else{
+                 last;
+           }
+      }
+     }
+
+     ReadMode restore;
+}
+
+if($i==3){
+   print "enter password failed";
+   exit 1;
+}
+
+print "\n", '-' x length $prompt , '-' x length $password , "\n";
+
+
+# -----------------------------------------
+# prepare command
+# -----------------------------------------
+
+if( -r "$keyfile"){
+   $key_content=`cat $keyfile`;
+}else{
+   print "\nread keyfile fail , $keyfile permission deny";
+   exit 1;
+}
+
+@cmd=( 
+
+       "echo " . $password .  "|sudo -S -u admin bash -c \" [ -e /home/admin/.ssh ] || mkdir /home/admin/.ssh ; chmod 755 /home/admin/.ssh ; echo '$key_content' >>/home/admin/.ssh/authorized_keys\"",
+
+  );
+
+# -----------------------------------------
+# start task , create child process to work
+# -----------------------------------------
+
+$s=IO::Select->new();
+
+my %pid_rdrs=();
+
+foreach my $host ( @hosts){
+           my ($rdr,$pid)=&child_fork($host);
+           $pid_rdrs{$pid} = $rdr;
+           $s->add($rdr);
+}
+
+# -----------------------------------------
+# wait child complete and their result 
+# -----------------------------------------
+
+my $timeout=10;
+my %result=();
+my $completes=0;
+while(my @ready = $s->can_read($timeout)){
+      foreach my $fh (@ready){
+           $result{$fh} = <$fh>;
+           my $completes++;
+      }
+      $s->remove(@ready);
+      last if($completes == @hosts);
+}
+
+while ( my ($pid, $rdr ) = each %pid_rdrs ){
+        waitpid($pid,WNOHANG);
+        close($rdr);
+        print $result{$rdr},"\n";
+}
+
+print    '-' x length $prompt , '-' x length $password , "\n";
+
+print "All hosts/nodegroups complete !\n";
+
+# ------------------------------------------------------------------------
+# Function define
+# ------------------------------------------------------------------------
+
+
+sub Usage {
+       pod2usage( -exitval => 1, -verbose => 99 );
+}
+
+
+sub make_tunnel {
+    $ssh=Net::OpenSSH->new($user.':'.$password.'@'.$_[0],%master_options);
+    if( $ssh->error ){
+          print  $_[0], "\t:",$ssh->error ,"\n";
+          exit 1;
+    }
+    if(!defined($ssh->system(\%ssh_options,@cmd))){
+          print  $_[0], "\t: " , $ssh->error ,"\n";    
+          exit 2;
+    }else{
+          print  $_[0], "\t: ","\e[0;31m[success]\e[0;m\n"; 
+          exit 0;
+    }
+}
+
+
+
+
+sub child_fork($){
+    my $rdr,$wtr;
+    my $host=shift;
+    socketpair($rdr,$wtr,AF_UNIX, SOCK_STREAM, PF_UNSPEC) or die "create socketpair failed ";
+    if(my $pid=fork()){
+          close($wtr);
+          return ($rdr,$pid);
+    }else{
+          close($rdr);
+          select $wtr;
+          &make_tunnel($host);
+    }
+}
+
+__END__
+
+=head1 NAME
+
+set-ssh-tunnel - open ssh-tunnel between console to machine's admin
+
+=head1 SYNOPSIS
+
+set-ssh-tunnel [options] hosts
+
+set-ssh-tunnel [options] nodegroups
+
+set-ssh-tunnel [options] host-list-files
+
+=head1 OPTIONS
+
+=over 8
+
+=item  B<-u|--user> ssh-user
+
+user connect to target hosts
+
+=item  B<-k|--keyfile> keyfile 
+
+KeyFile to be added
+
+=item  B<-h|--hosts>  host-list
+
+hosts to apply separate by blank space
+
+=item  B<-s> cmX
+
+only apply to cmX IDC
+
+=item  B<-g|--nodegroups> nodegroup-list
+
+nodegroups to apply
+
+=item  B<-f|--hostsfiles> host-list-files
+
+hosts-files to apply
+
+=item  B<-n>
+
+use ngethost.sh to gather hosts in a nodegroup
+
+=back
+
+=head1 DESCRIPTION
+
+=over
+
+=item  B<nodegroup-list>
+
+nodegroup1 nodegroup2 ...
+
+=item  B<host-list-files>
+
+host-list-file1 host-list-file2 ...
+each file contain host-list , each host seperate by '\n' character.
+
+=back
+
+*if not set `B<-k>' option , keyfile = B</home/admin/.ssh/id_rsa.pub>
+
+*`-g' , `-f' and `B<-h>' are needed at least one     
+
+*`-s' only efficient with `-g' 
+
+=head1 AUTHOR
+
+BY Yunxing <yunxing.cyx\@taobao.com> 2012/03/24
+
+=cut
+

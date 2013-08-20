@@ -80,10 +80,10 @@ foreach my $nodegroup (@nodegroups) {
   }
   else {
     if (defined($single)) {    # -s
-      $hsts = `opsfree -eg $nodegroup -s $single --split ' '`;
+      $hsts = `armory -eg $nodegroup -s $single --split ' '`;
     }
     else {
-      $hsts = `opsfree -eg $nodegroup --split ' '`;
+      $hsts = `armory -eg $nodegroup --split ' '`;
     }
   }
 
@@ -237,8 +237,25 @@ sub Usage {
   pod2usage(-exitval => 1, -verbose => 99);
 }
 
+sub clean_ssh_know_hosts($) {
+  my $hostname = shift;
+  my $ipaddress = inet_ntoa(scalar gethostbyname($hostname));
+  if($ipaddress){
+      system("sed -i '/$hostname \\|$hostname,\\|,$ipadress /d' ~/.ssh/known_hosts");
+#      print "delete with ip, host=$hostname\n";
+  }else {
+      system("sed -i '/$hostname /d' ~/.ssh/known_hosts");
+#      print "delete without ip, host = $hostname \n";
+  }
+  return $? == 0 ? 1 : 0;
+}
 
 sub make_tunnel {
+  my $rv = clean_ssh_know_hosts($_[0]);
+  unless($rv){
+     print $_[0], "\t: ", "clean ~/.ssh/known_hosts failed",  "\n";
+     exit 3;
+  }
   $ssh = Net::OpenSSH->new($user . ':' . $password . '@' . $_[0],
     %master_options);
   if ($ssh->error) {

@@ -238,6 +238,7 @@ sub Usage {
 }
 
 sub clean_ssh_know_hosts($) {
+  -w "$ENV{HOME}/.ssh/known_hosts" or return 1;
   my $hostname = shift;
   my $ipaddress = inet_ntoa(scalar gethostbyname($hostname));
   if($ipaddress){

@@ -10,6 +10,7 @@
 use Term::ReadKey;
 use Term::ReadLine;
 use Net::OpenSSH;
+#$Net::OpenSSH::debug |= 16;
 use IO::Select;
 use IO::Socket;
 use Getopt::Long;
@@ -182,9 +183,9 @@ else {
 
 @cmd = (
 
-  "echo "
+  "echo '"
     . $password
-    . "|sudo -S -u admin bash -c \" [ -e /home/admin/.ssh ] || mkdir /home/admin/.ssh ; chmod 755 /home/admin/.ssh ; echo '$key_content' >>/home/admin/.ssh/authorized_keys\"",
+    . "'|sudo -S -u admin bash -c \" [ -e /home/admin/.ssh ] || mkdir /home/admin/.ssh ; chmod 755 /home/admin/.ssh ; echo '$key_content' >>/home/admin/.ssh/authorized_keys\"",
 
 );
 
